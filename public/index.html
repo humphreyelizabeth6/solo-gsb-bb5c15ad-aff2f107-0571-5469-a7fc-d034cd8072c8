@@ -35,6 +35,15 @@
           <input type="checkbox" id="registration-marks" />
           <span>添加印张定位标记（版心四周各留 8 mm 空白，四角绘制裁切线，中央折线上下端绘制定位线）</span>
         </label>
+        <label class="option-check">
+          <input type="checkbox" id="creep-compensation" />
+          <span>启用骑马钉爬移补偿（内帖向书脊内移；正背两面左页向右、右页向左平移，页序与纸张尺寸不变）</span>
+        </label>
+        <label id="paper-thickness-field" class="option-field" hidden>
+          <span>纸张厚度：</span>
+          <input type="number" id="paper-thickness" min="0.05" max="0.5" step="0.001" value="0.1" />
+          <span class="option-hint">0.05～0.5 mm；每帖从外到内单侧内移量＝（帖内张号－1）×纸厚，分册签帖各帖分别从零计算</span>
+        </label>
       </div>
 
       <div class="btn-row">
@@ -303,7 +312,7 @@
         <label class="reprint-pages-field">
           <span>受损原稿页码：</span>
           <input type="text" id="reprint-pages" placeholder="如 2,5-7" />
-          <span class="option-hint">单个页码或区间，逗号分隔；同一印张命中多页只补印一次，按原印张顺序正背成对输出，保留原印张尺寸与定位标记</span>
+          <span class="option-hint">单个页码或区间，逗号分隔；同一印张命中多页只补印一次，按原印张顺序正背成对输出，沿用本次纸厚与爬移补偿，保留原印张尺寸与定位标记</span>
         </label>
         <p id="reprint-status" class="status" role="status"></p>
         <div id="reprint-result" class="reprint-result" hidden></div>
