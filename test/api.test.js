@@ -3,8 +3,19 @@
 // HTTP 集成测试：不监听固定端口，直接在 ephemeral 端口上启动 app。
 const assert = require('assert');
 const http = require('http');
-const { PDFDocument, StandardFonts, rgb, degrees } = require('pdf-lib');
+const zlib = require('zlib');
+const { PDFDocument, PDFName, StandardFonts, rgb, degrees } = require('pdf-lib');
 const { app } = require('../server');
+
+// 读取输出页的内容流文本，用于逐页比对补印 PDF 与完整拼版是否一致
+function decodePageContent(doc, pageIndex) {
+  const node = doc.getPage(pageIndex).node;
+  const contents = node.get(PDFName.of('Contents'));
+  const refs = typeof contents.asArray === 'function' ? contents.asArray() : [contents];
+  return refs.map((ref) => zlib.inflateSync(
+    Buffer.from(doc.context.lookup(ref).getContents()),
+  ).toString('latin1')).join('\n');
+}
 
 function multipartBody(fields, boundary) {
   const chunks = [];
@@ -755,6 +766,111 @@ function jsonRequest(server, urlPath, payload) {
     assert.ok(Math.abs(plainQuote.layout.sheet.widthMm - 420) < 0.05);
     assert.ok(Math.abs(plainQuote.layout.sheet.heightMm - 297) < 0.05);
 
+    // ---------- 骑马钉爬移补偿 /api/impose?creepCompensation=on&paperThickness=... ----------
+    // 5 页 -> 2 张纸：方案记录爬移状态与每张内移量（第 1 张 0、第 2 张 0.1mm），
+    // 输出页数/印张尺寸/页序不变
+    const creepBody = multipartBody({
+      text: { creepCompensation: 'on', paperThickness: '0.1' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const creepResp = await request(server, 'POST', '/api/impose', {
+      body: creepBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': creepBody.length,
+      },
+    });
+    assert.strictEqual(creepResp.status, 200);
+    const creepPlan = JSON.parse(decodeURIComponent(creepResp.headers['x-imposition-plan']));
+    assert.deepStrictEqual(creepPlan.creep, { enabled: true, paperThicknessMm: 0.1 });
+    assert.deepStrictEqual(
+      creepPlan.sheets.map((s) => s.creep.shiftMm),
+      [0, 0.1],
+      '每张纸记录按张号计算的单侧内移量',
+    );
+    assert.ok(Math.abs(creepPlan.sheets[1].creep.shiftPt - 0.1 * (72 / 25.4)) < 1e-4);
+    // 页序与未启用一致
+    assert.deepStrictEqual(
+      creepPlan.sheets.map((s) => [s.front, s.back]),
+      plainImposePlan.sheets.map((s) => [s.front, s.back]),
+    );
+    // 印张尺寸不变（未启用定位标记）
+    assert.ok(Math.abs(creepPlan.sheet.width - 595.28 * 2) < 0.01);
+    assert.ok(Math.abs(creepPlan.sheet.height - 841.89) < 0.01);
+    const creepPdfDoc = await PDFDocument.load(creepResp.body);
+    assert.strictEqual(creepPdfDoc.getPageCount(), 4, '爬移不改变输出页数');
+    assert.ok(Math.abs(creepPdfDoc.getPage(0).getWidth() - 595.28 * 2) < 0.5);
+    assert.ok(Math.abs(creepPdfDoc.getPage(0).getHeight() - 841.89) < 0.5);
+
+    // 分册签帖 + 爬移：各帖分别从零（5 页每帖 1 张 -> 两帖，各自第 1 张内移 0）
+    const sigCreepBody = multipartBody({
+      text: { signatureMode: 'on', maxSheetsPerSignature: '1', creepCompensation: 'on', paperThickness: '0.2' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const sigCreepResp = await request(server, 'POST', '/api/impose', {
+      body: sigCreepBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': sigCreepBody.length,
+      },
+    });
+    assert.strictEqual(sigCreepResp.status, 200);
+    const sigCreepPlan = JSON.parse(decodeURIComponent(sigCreepResp.headers['x-imposition-plan']));
+    assert.strictEqual(sigCreepPlan.creep.enabled, true);
+    assert.strictEqual(sigCreepPlan.creep.paperThicknessMm, 0.2);
+    assert.strictEqual(sigCreepPlan.signatures.length, 2);
+    for (const sig of sigCreepPlan.signatures) {
+      assert.deepStrictEqual(sig.sheets.map((s) => s.creep.shiftMm), [0], '每帖第 1 张内移为 0');
+    }
+
+    // 非法纸厚 -> 400（未勾选时不提交纸厚字段，原样成功）
+    for (const badThickness of ['0', '0.04', '0.51', '-0.1', 'abc', '', '0.1mm']) {
+      const badBody = multipartBody({
+        text: { creepCompensation: 'on', paperThickness: badThickness },
+        files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+      }, boundary);
+      const badResp = await request(server, 'POST', '/api/impose', {
+        body: badBody,
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': badBody.length,
+        },
+      });
+      assert.strictEqual(badResp.status, 400, `纸厚 ${JSON.stringify(badThickness)} 应返回 400`);
+      assert.match(JSON.parse(badResp.body.toString()).error, /0.05～0.5/);
+    }
+
+    // 勾选但缺纸厚字段 -> 400
+    const missingThicknessBody = multipartBody({
+      text: { creepCompensation: 'on' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const missingThicknessResp = await request(server, 'POST', '/api/impose', {
+      body: missingThicknessBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': missingThicknessBody.length,
+      },
+    });
+    assert.strictEqual(missingThicknessResp.status, 400);
+
+    // 未勾选但带非法纸厚：忽略纸厚，输出与未启用一致
+    const ignoredBody = multipartBody({
+      text: { paperThickness: '999' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const ignoredResp = await request(server, 'POST', '/api/impose', {
+      body: ignoredBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': ignoredBody.length,
+      },
+    });
+    assert.strictEqual(ignoredResp.status, 200);
+    const ignoredPlan = JSON.parse(decodeURIComponent(ignoredResp.headers['x-imposition-plan']));
+    assert.strictEqual(ignoredPlan.creep.enabled, false, '未勾选爬移时忽略纸厚字段');
+    assert.deepStrictEqual(ignoredPlan.sheets.map((s) => s.creep.shiftMm), [0, 0]);
+
     // ---------- 缺页补印 /api/reprint ----------
     // 5 页文档 -> 补 3 白 -> 2 张纸：第1张 F[空白|1] B[2|空白]，第2张 F[空白|3] B[4|5]
     const reprintBody = multipartBody({
@@ -843,6 +959,61 @@ function jsonRequest(server, urlPath, payload) {
     assert.strictEqual(marksReprintDoc.getPageCount(), 2);
     assert.ok(Math.abs(marksReprintDoc.getPage(0).getWidth() - (595.28 * 2 + 2 * MM8_PT)) < 0.5);
     assert.ok(Math.abs(marksReprintDoc.getPage(0).getHeight() - (841.89 + 2 * MM8_PT)) < 0.5);
+
+    // 爬移补印：沿用本次纸厚 0.1mm，明细回传每张内移量，印张尺寸不变
+    const creepReprintBody = multipartBody({
+      text: { pages: '2,3', creepCompensation: 'on', paperThickness: '0.1' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const creepReprintResp = await request(server, 'POST', '/api/reprint', {
+      body: creepReprintBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': creepReprintBody.length,
+      },
+    });
+    assert.strictEqual(creepReprintResp.status, 200);
+    const creepReprintPlan = JSON.parse(decodeURIComponent(creepReprintResp.headers['x-reprint-plan']));
+    assert.deepStrictEqual(creepReprintPlan.creep, { enabled: true, paperThicknessMm: 0.1 });
+    assert.deepStrictEqual(
+      creepReprintPlan.sheets.map((s) => [s.sheet, s.creep.shiftMm]),
+      [[1, 0], [2, 0.1]],
+      '每张补印纸记录与完整拼版一致的内移量',
+    );
+    const creepReprintDoc = await PDFDocument.load(creepReprintResp.body);
+    assert.strictEqual(creepReprintDoc.getPageCount(), 4);
+    assert.ok(Math.abs(creepReprintDoc.getPage(0).getWidth() - 595.28 * 2) < 0.5,
+      '爬移不改变印张尺寸');
+    assert.ok(Math.abs(creepReprintDoc.getPage(0).getHeight() - 841.89) < 0.5);
+
+    // 爬移补印内容与完整爬移拼版对应印张逐页一致
+    const creepFullPlanPdf = await PDFDocument.load(creepResp.body);
+    assert.deepStrictEqual(
+      creepReprintPlan.sheets.map((s) => s.outputPages),
+      [[1, 2], [3, 4]],
+    );
+    for (let i = 0; i < 4; i += 1) {
+      assert.strictEqual(
+        decodePageContent(creepReprintDoc, i),
+        decodePageContent(creepFullPlanPdf, i),
+        `爬移补印第 ${i + 1} 页应与完整爬移拼版对应印张一致`,
+      );
+    }
+
+    // 爬移补印非法纸厚 -> 400
+    const badCreepReprintBody = multipartBody({
+      text: { pages: '2', creepCompensation: 'on', paperThickness: '0.6' },
+      files: [{ field: 'pdf', filename: 'sample.pdf', contentType: 'application/pdf', data: pdfBytes }],
+    }, boundary);
+    const badCreepReprintResp = await request(server, 'POST', '/api/reprint', {
+      body: badCreepReprintBody,
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': badCreepReprintBody.length,
+      },
+    });
+    assert.strictEqual(badCreepReprintResp.status, 400);
+    assert.match(JSON.parse(badCreepReprintResp.body.toString()).error, /0.05～0.5/);
 
     // 缺少 pages 字段 / 空输入 -> 400
     const noPagesBody = multipartBody({

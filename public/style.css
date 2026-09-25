@@ -505,6 +505,33 @@ main {
 .signature-table tbody tr:nth-child(even) { background: #f8fafc; }
 .signature-table .sheet-nums { color: var(--brand-dark); font-weight: 600; }
 
+.creep-summary { margin: 12px 0 4px; }
+.creep-hint { font-size: 13px; color: var(--muted); margin: 0 0 10px; }
+.creep-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.creep-table th,
+.creep-table td {
+  border: 1px solid var(--line);
+  padding: 7px 10px;
+  text-align: left;
+}
+.creep-table th { background: #fdf3e7; font-weight: 700; }
+.creep-table tbody tr:nth-child(even) { background: #fdfaf5; }
+.creep-table td:last-child { color: #b45309; font-weight: 600; }
+
+.sheet-creep-tag {
+  font-size: 12px;
+  color: #b45309;
+  background: #fdf3e7;
+  border: 1px solid #f0d9b5;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-bottom: 10px;
+}
+
 .signature-group {
   background: #eef3fb;
   border: 1px solid #c4d6f4;
@@ -985,6 +1012,19 @@ main {
 }
 .reprint-sheet-title { font-weight: 700; }
 .reprint-sheet-pages { color: var(--muted); }
+.reprint-creep {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #b45309;
+}
+.reprint-sheet-creep {
+  font-size: 12px;
+  color: #b45309;
+  background: #fdf3e7;
+  border: 1px solid #f0d9b5;
+  border-radius: 6px;
+  padding: 2px 8px;
+}
 
 /* ---------- 批量印前校验 ---------- */
 .batch-card h2 { margin: 0 0 8px; font-size: 18px; }

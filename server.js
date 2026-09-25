@@ -3,7 +3,7 @@
 const path = require('path');
 const express = require('express');
 const multer = require('multer');
-const { imposePdf, parseMaxSheetsPerSignature } = require('./lib/impose');
+const { imposePdf, parseMaxSheetsPerSignature, parseCreepPaperThickness } = require('./lib/impose');
 const { reprintPdf, ReprintInputError } = require('./lib/reprint');
 const { preflightPdf } = require('./lib/preflight');
 const {
@@ -46,6 +46,37 @@ function looksLikePdf(file) {
 
 function missingFileResponse(res) {
   return res.status(400).json({ error: '请通过字段 pdf 上传一个 PDF 文件' });
+}
+
+/**
+ * 从 multipart 表单中解析拼版选项：/api/impose 与 /api/reprint 共用同一套
+ * 字段与校验规则（分册签帖、印张定位标记、骑马钉爬移补偿）。
+ *
+ * @returns {{ options?: object, error?: string }}
+ */
+function readImposeOptions(body) {
+  const options = {};
+  if (body && body.signatureMode === 'on') {
+    try {
+      options.maxSheetsPerSignature =
+        parseMaxSheetsPerSignature(body.maxSheetsPerSignature);
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  if (body && body.registrationMarks === 'on') {
+    options.registrationMarks = true;
+  }
+  // 骑马钉爬移补偿：creepCompensation=on 时启用，paperThickness 必须为
+  // 0.05～0.5 mm 的数字；未勾选时不提交纸厚，输出与原行为完全一致
+  if (body && body.creepCompensation === 'on') {
+    try {
+      options.creepPaperThicknessMm = parseCreepPaperThickness(body.paperThickness);
+    } catch (err) {
+      return { error: err.message };
+    }
+  }
+  return { options };
 }
 
 // 印前校验接口：仅逐页检查并返回 JSON 报告，不生成拼版文件。
@@ -187,22 +218,9 @@ app.post('/api/impose', upload.single('pdf'), async (req, res) => {
       return res.status(400).json({ error: '仅支持 PDF 文件' });
     }
 
-    // 分册签帖模式：signatureMode=on 时启用；maxSheetsPerSignature 必须为 1～20 的整数
-    const options = {};
-    if (req.body && req.body.signatureMode === 'on') {
-      try {
-        options.maxSheetsPerSignature =
-          parseMaxSheetsPerSignature(req.body.maxSheetsPerSignature);
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
-    }
-
-    // 印张定位标记：registrationMarks=on 时版心四周各加 8mm 空白，
-    // 正背两面四角绘制裁切线、中央折线上下端绘制定位线
-    if (req.body && req.body.registrationMarks === 'on') {
-      options.registrationMarks = true;
-    }
+    // 分册签帖、印张定位标记、骑马钉爬移补偿：与 /api/reprint 共用同一套解析
+    const { options, error } = readImposeOptions(req.body);
+    if (error) return res.status(400).json({ error });
 
     const { pdfBytes, plan } = await imposePdf(req.file.buffer, options);
 
@@ -235,19 +253,9 @@ app.post('/api/reprint', upload.single('pdf'), async (req, res) => {
       return res.status(400).json({ error: '仅支持 PDF 文件' });
     }
 
-    // 拼版选项与 /api/impose 完全一致：分册签帖 + 印张定位标记
-    const options = {};
-    if (req.body && req.body.signatureMode === 'on') {
-      try {
-        options.maxSheetsPerSignature =
-          parseMaxSheetsPerSignature(req.body.maxSheetsPerSignature);
-      } catch (err) {
-        return res.status(400).json({ error: err.message });
-      }
-    }
-    if (req.body && req.body.registrationMarks === 'on') {
-      options.registrationMarks = true;
-    }
+    // 拼版选项与 /api/impose 完全一致：分册签帖 + 印张定位标记 + 爬移补偿
+    const { options, error } = readImposeOptions(req.body);
+    if (error) return res.status(400).json({ error });
 
     const { pdfBytes, reprint } = await reprintPdf(
       req.file.buffer,

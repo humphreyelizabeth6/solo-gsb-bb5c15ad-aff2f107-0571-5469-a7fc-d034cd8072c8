@@ -14,8 +14,14 @@ const signatureModeInput = document.getElementById('signature-mode');
 const maxSheetsField = document.getElementById('max-sheets-field');
 const maxSheetsInput = document.getElementById('max-sheets');
 const registrationMarksInput = document.getElementById('registration-marks');
+const creepCompensationInput = document.getElementById('creep-compensation');
+const paperThicknessField = document.getElementById('paper-thickness-field');
+const paperThicknessInput = document.getElementById('paper-thickness');
+const CREEP_MIN_MM = 0.05;
+const CREEP_MAX_MM = 0.5;
 const summaryListEl = document.getElementById('summary-list');
 const signatureSummaryEl = document.getElementById('signature-summary');
+const creepSummaryEl = document.getElementById('creep-summary');
 const reprintBoxEl = document.getElementById('reprint-box');
 const reprintPagesInput = document.getElementById('reprint-pages');
 const reprintBtn = document.getElementById('reprint-btn');
@@ -49,6 +55,28 @@ let lastImposeOptions = null;
 signatureModeInput.addEventListener('change', () => {
   maxSheetsField.hidden = !signatureModeInput.checked;
 });
+
+creepCompensationInput.addEventListener('change', () => {
+  paperThicknessField.hidden = !creepCompensationInput.checked;
+});
+
+/**
+ * 校验骑马钉爬移纸厚：仅接受 0.05～0.5 mm 的数字。
+ * @returns {number|null} 合法时返回数字，非法时返回 null（并已设置错误提示）
+ */
+function readPaperThickness() {
+  const raw = paperThicknessInput.value;
+  if (!/^\s*\d+(?:\.\d+)?\s*$/.test(raw)) {
+    setStatus(`请填写纸张厚度（${CREEP_MIN_MM}～${CREEP_MAX_MM} mm 的数字）`, 'error');
+    return null;
+  }
+  const value = Number(raw.trim());
+  if (value < CREEP_MIN_MM || value > CREEP_MAX_MM) {
+    setStatus(`纸张厚度必须在 ${CREEP_MIN_MM}～${CREEP_MAX_MM} mm 之间`, 'error');
+    return null;
+  }
+  return value;
+}
 
 /**
  * 校验每帖最多纸张数：仅接受 1～20 的整数。
@@ -84,6 +112,8 @@ function clearResult() {
   summaryListEl.innerHTML = '';
   signatureSummaryEl.hidden = true;
   signatureSummaryEl.innerHTML = '';
+  creepSummaryEl.hidden = true;
+  creepSummaryEl.innerHTML = '';
   clearQuote();
   clearCutting();
   clearReprint();
@@ -357,6 +387,13 @@ imposeBtn.addEventListener('click', async () => {
     if (maxSheets === null) return;
   }
 
+  const useCreep = creepCompensationInput.checked;
+  let paperThickness = null;
+  if (useCreep) {
+    paperThickness = readPaperThickness();
+    if (paperThickness === null) return;
+  }
+
   imposeBtn.disabled = true;
   setStatus('正在拼版，请稍候…', 'info');
   clearResult();
@@ -369,6 +406,10 @@ imposeBtn.addEventListener('click', async () => {
   }
   if (registrationMarksInput.checked) {
     form.append('registrationMarks', 'on');
+  }
+  if (useCreep) {
+    form.append('creepCompensation', 'on');
+    form.append('paperThickness', String(paperThickness));
   }
 
   try {
@@ -395,6 +436,8 @@ imposeBtn.addEventListener('click', async () => {
       signatureMode: useSignatures,
       maxSheetsPerSignature: useSignatures ? maxSheets : null,
       registrationMarks: registrationMarksInput.checked,
+      creepCompensation: useCreep,
+      paperThickness: useCreep ? paperThickness : null,
     };
     reprintBoxEl.hidden = false;
 
@@ -472,11 +515,61 @@ function renderSummary(plan) {
         : '未启用',
     );
   }
+  if (plan.creep) {
+    appendSummaryItem(
+      '爬移补偿',
+      plan.creep.enabled
+        ? `已启用（纸厚 ${plan.creep.paperThicknessMm} mm，各帖从外到内按帖内张号内移）`
+        : '未启用',
+    );
+  }
 
   if (plan.signatureMode) {
     renderSignatureSummary(plan);
   }
+  if (plan.creep && plan.creep.enabled) {
+    renderCreepSummary(plan);
+  }
   summaryEl.hidden = false;
+}
+
+/**
+ * 渲染骑马钉爬移补偿明细：逐张列出帖号（分册模式）、帖内张号与单侧内移量。
+ * 整册模式视为唯一一帖（张号即全册张号）；分册模式各帖分别从零计算。
+ */
+function renderCreepSummary(plan) {
+  creepSummaryEl.innerHTML = '';
+
+  const hint = document.createElement('p');
+  hint.className = 'creep-hint';
+  hint.textContent = `纸厚 ${plan.creep.paperThicknessMm} mm：每张纸单侧内移量＝（帖内张号－1）×纸厚，`
+    + '同一印张正背两面左页向右、右页向左平移；槽位裁切在各自半区，页序与纸张尺寸不变。';
+  creepSummaryEl.appendChild(hint);
+
+  const table = document.createElement('table');
+  table.className = 'creep-table';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>帖号</th><th>帖内张号</th><th>单侧内移量（mm）</th></tr>';
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const appendRow = (sheet, sig) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${sig ? `第 ${sig.signature} 帖` : '整册（第 1 帖）'}</td>`
+      + `<td>第 ${sheet.sheet} 张</td>`
+      + `<td>${sheet.creep.shiftMm.toFixed(3)} mm</td>`;
+    tbody.appendChild(tr);
+  };
+  if (plan.signatureMode) {
+    for (const sig of plan.signatures) {
+      for (const sheet of sig.sheets) appendRow(sheet, sig);
+    }
+  } else {
+    for (const sheet of plan.sheets) appendRow(sheet, null);
+  }
+  table.appendChild(tbody);
+  creepSummaryEl.appendChild(table);
+  creepSummaryEl.hidden = false;
 }
 
 function renderSignatureSummary(plan) {
@@ -572,6 +665,14 @@ function renderPreview(plan) {
         title.textContent = `第 ${sheet.sheet} 张纸 / 共 ${plan.sheets.length} 张`;
       }
       card.appendChild(title);
+
+      if (plan.creep && plan.creep.enabled && sheet.creep) {
+        const creepTag = document.createElement('div');
+        creepTag.className = 'sheet-creep-tag';
+        creepTag.textContent = `爬移内移：单侧 ${sheet.creep.shiftMm.toFixed(3)} mm`
+          + `（左页向右、右页向左，槽位裁切在各自半区）`;
+        card.appendChild(creepTag);
+      }
 
       card.appendChild(buildSide('正面', sheet.front, false, sheetRatio));
       card.appendChild(buildSide('背面', sheet.back, true, sheetRatio));
@@ -1861,6 +1962,14 @@ function renderReprintResult(data) {
     + `按原印张顺序正背成对输出，补印 PDF 共 ${data.pageCount} 页。`;
   reprintResultEl.appendChild(layout);
 
+  if (data.creep && data.creep.enabled) {
+    const creepLine = document.createElement('p');
+    creepLine.className = 'reprint-creep';
+    creepLine.textContent = `沿用本次爬移补偿（纸厚 ${data.creep.paperThicknessMm} mm）：`
+      + '补印印张的内移量与完整拼版对应印张完全一致。';
+    reprintResultEl.appendChild(creepLine);
+  }
+
   const list = document.createElement('ul');
   list.className = 'reprint-sheet-list';
   for (const sheet of data.sheets) {
@@ -1878,6 +1987,14 @@ function renderReprintResult(data) {
     hit.textContent = `命中页码：${sheet.hitPages.map((p) => `第 ${p} 页`).join('、')}`;
 
     li.append(title, hit);
+
+    if (data.creep && data.creep.enabled && sheet.creep) {
+      const creep = document.createElement('span');
+      creep.className = 'reprint-sheet-creep';
+      creep.textContent = `爬移内移：单侧 ${Number(sheet.creep.shiftMm).toFixed(3)} mm`;
+      li.appendChild(creep);
+    }
+
     list.appendChild(li);
   }
   reprintResultEl.appendChild(list);
@@ -1920,6 +2037,10 @@ reprintBtn.addEventListener('click', async () => {
   }
   if (lastImposeOptions.registrationMarks) {
     form.append('registrationMarks', 'on');
+  }
+  if (lastImposeOptions.creepCompensation) {
+    form.append('creepCompensation', 'on');
+    form.append('paperThickness', String(lastImposeOptions.paperThickness));
   }
 
   try {
